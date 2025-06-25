@@ -1,0 +1,92 @@
+-- Користувацький тип статусу замовлення
+CREATE TYPE order_status AS ENUM ('Очікується', 'Оплачено', 'Скасовано', 'Виконано');
+
+-- Зміна поля у таблиці orders
+ALTER TABLE orders 
+ALTER COLUMN status DROP DEFAULT,
+ALTER COLUMN status TYPE order_status USING status::order_status,
+ALTER COLUMN status SET DEFAULT 'Очікується';
+
+CREATE OR REPLACE FUNCTION get_average_rating(prod_id INT)
+RETURNS NUMERIC AS $$
+DECLARE
+    avg_rating NUMERIC;
+BEGIN
+    SELECT AVG(rating) INTO avg_rating
+    FROM reviews
+    WHERE product_id = prod_id;
+    
+    RETURN COALESCE(avg_rating, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT product_name, get_average_rating(product_id) AS avg_rating
+FROM products;
+
+-- Створення таблиці логів
+CREATE TABLE product_log (
+    log_id SERIAL PRIMARY KEY,
+    action_type VARCHAR(10),
+    product_id INT,
+    old_price NUMERIC,
+    new_price NUMERIC,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION log_product_update()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        INSERT INTO product_log(action_type, product_id, old_price, new_price)
+        VALUES ('UPDATE', NEW.product_id, OLD.price, NEW.price);
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO product_log(action_type, product_id, old_price)
+        VALUES ('DELETE', OLD.product_id, OLD.price);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_product_update
+AFTER UPDATE OR DELETE ON products
+FOR EACH ROW
+EXECUTE FUNCTION log_product_update();
+
+-- Додамо стовпець суми
+ALTER TABLE orders ADD COLUMN total_amount NUMERIC DEFAULT 0;
+
+-- Функція, яка оновлює суму
+CREATE OR REPLACE FUNCTION update_order_total()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE orders
+    SET total_amount = (
+        SELECT SUM(p.price * oi.quantity)
+        FROM order_items oi
+        JOIN products p ON oi.product_id = p.product_id
+        WHERE oi.order_id = NEW.order_id
+    )
+    WHERE order_id = NEW.order_id;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_update_total
+AFTER INSERT OR UPDATE ON order_items
+FOR EACH ROW
+EXECUTE FUNCTION update_order_total();
+
+-- 1. Вивести всі замовлення з підрахованою сумою
+SELECT order_id, total_amount FROM orders;
+
+-- 2. Вивести лог змін по товарах
+SELECT * FROM product_log ORDER BY changed_at DESC;
+
+-- 3. Змінити ціну товару для тесту
+UPDATE products SET price = price + 100 WHERE product_id = 1;
+
+-- 4. Перевірити середній рейтинг
+SELECT product_name, get_average_rating(product_id) FROM products;
+
+
